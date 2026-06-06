@@ -1,0 +1,14 @@
+{
+    "$schema": "https://apify.com/schemas/v1/actor.ide.json",
+    "actorSpecification": 1,
+    "name": "sol-pin",
+    "title": "Empty Python project",
+    "description": "Empty project in Python.",
+    "version": "0.0",
+    "buildTag": "latest",
+    "meta": {
+        "templateId": "python-empty",
+        "generatedBy": "<FILL-IN-MODEL>"
+    },
+    "dockerfile": "../Dockerfile"
+}
