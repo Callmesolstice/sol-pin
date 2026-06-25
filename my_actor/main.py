@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from apify import Actor
 from apify_client import ApifyClient
-from sol.notion.core import create_page, query_db, update_page
+from sol.notion.core import create_page, query_db, update_page, file_url
 from sol.utils import should_snapshot
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -127,7 +127,7 @@ def pin_post(endpoint, payload):  # <- POST request to Pinterest API
 
 def get_board_id(board_name):
     """Looks up board ID from KV store. Returns None if not found."""
-    client = ApifyClient()
+    client = ApifyClient(token=Actor.configuration.token)
     try:
         store = client.key_value_stores().get_or_create(name=KV_STORE_NAME)
         store_id = store["id"]
@@ -140,7 +140,7 @@ def get_board_id(board_name):
 
 def save_board_to_kv(board_name, board_id):
     """Saves a board name → ID mapping to the KV store."""
-    client = ApifyClient()
+    client = ApifyClient(token=Actor.configuration.token)
     try:
         store = client.key_value_stores().get_or_create(name=KV_STORE_NAME)
         store_id = store["id"]
@@ -212,15 +212,23 @@ def get_pin_analytics(pin_id, start_date, end_date):
 
 
 def publish_pin(board_id, title, description, media_url, dest_link):
-    """Creates a pin on Pinterest."""
+    """Creates a pin on Pinterest. Fetches the image and uploads as base64
+    so Pinterest's CDN never needs to reach the source URL directly."""
+    import base64
+    img = requests.get(media_url, timeout=30)
+    if img.status_code != 200:
+        print(f"  Image fetch failed: {img.status_code} {media_url[:80]}")
+        return None
+    content_type = img.headers.get("content-type", "image/jpeg").split(";")[0].strip()
     payload = {
         "board_id":    board_id,
-        "title":       title[:100],  # Pinterest title limit
-        "description": description[:800],  # Pinterest description limit
+        "title":       title[:100],
+        "description": description[:800],
         "link":        dest_link or "",
         "media_source": {
-            "source_type": "image_url",
-            "url":         media_url,
+            "source_type": "image_base64",
+            "content_type": content_type,
+            "data":         base64.b64encode(img.content).decode(),
         },
     }
     return pin_post("pins", payload)
@@ -261,10 +269,10 @@ def get_scheduled_pins():  # <- gets Pinterest pieces scheduled to post today
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     pages = query_db(notion_token, CONTENT_PIECES_DB, {
         "and": [
-            {"property": "Platform",  "select": {"equals": "Pinterest"}},
-            {"property": "Stage",     "status": {"equals": "Scheduled"}},
-            {"property": "Post ID",   "rich_text": {"is_empty": True}},
-            {"property": "Published", "date":   {"on_or_before": today}},
+            {"property": "Platform",        "select": {"equals": "Pinterest"}},
+            {"property": "Stage",           "status": {"equals": "Scheduled"}},
+            {"property": "Post ID",         "rich_text": {"is_empty": True}},
+            {"property": "Scheduled time",  "date":   {"on_or_before": today}},
         ]
     })
     pins = []
@@ -272,7 +280,14 @@ def get_scheduled_pins():  # <- gets Pinterest pieces scheduled to post today
         props        = page["properties"]
         title_blocks = props.get("Piece", {}).get("title", [])
         caption_rt   = props.get("Caption", {}).get("rich_text", [])
-        media_link   = props.get("Media link", {}).get("url")
+        # Media link is rich_text in the live schema (not url) — read plain_text.
+        media_link_rt = props.get("Media link", {}).get("rich_text", [])
+        media_link    = media_link_rt[0]["plain_text"] if media_link_rt else None
+        # Media file is a Files & media property — Notion already hands back the
+        # signed S3 url in this same query response, no second call needed.
+        media_file    = file_url(props.get("Media file"))
+        # Prefer the uploaded file; fall back to the link.
+        media_url     = media_file or media_link
         dest_link    = props.get("Dest. link", {}).get("url")
         board_select = (props.get("Board", {}).get("select") or {}).get("name")
         new_board_rt = props.get("new_board", {}).get("rich_text", [])
@@ -280,8 +295,8 @@ def get_scheduled_pins():  # <- gets Pinterest pieces scheduled to post today
 
         title = title_blocks[0]["plain_text"] if title_blocks else "Untitled"
 
-        if not media_link:
-            print(f"  Skipping '{title}' — no Media link set")
+        if not media_url:
+            print(f"  Skipping '{title}' — no Media file or Media link set")
             continue
         if not board_select:
             print(f"  Skipping '{title}' — no Board selected")
@@ -291,7 +306,7 @@ def get_scheduled_pins():  # <- gets Pinterest pieces scheduled to post today
             "notion_page_id": page["id"],
             "title":          title,
             "caption":        caption_rt[0]["plain_text"] if caption_rt else "",
-            "media_url":      media_link,
+            "media_url":      media_url,
             "dest_link":      dest_link,
             "board_name":     board_select,
             "new_board":      new_board,
