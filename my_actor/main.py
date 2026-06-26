@@ -1,13 +1,15 @@
 """
 pinterest_notion_sync.py — Pinterest to Notion Sync (Apify Actor)
-Credentials: Set via Apify Actor environment variables:
-  PINTEREST_ACCESS_TOKEN  = your Pinterest OAuth access token
-  PINTEREST_REFRESH_TOKEN = your Pinterest OAuth refresh token
-  PINTEREST_APP_ID        = your Pinterest app ID
-  PINTEREST_APP_SECRET    = your Pinterest app secret
-  NOTION_ACCESS_TOKEN     = your Notion integration token
+Credentials (input fields take priority; env vars are the fallback):
+  pinterest_access_token  / PINTEREST_ACCESS_TOKEN  — Pinterest OAuth access token
+  pinterest_refresh_token / PINTEREST_REFRESH_TOKEN — Pinterest OAuth refresh token
+  notion_access_token     / NOTION_ACCESS_TOKEN     — Notion integration token
+Shared app credentials (env vars only, same across all tenants):
+  PINTEREST_APP_ID     — Pinterest app ID
+  PINTEREST_APP_SECRET — Pinterest app secret
 """
 
+import re
 import requests
 import time
 import os
@@ -27,9 +29,12 @@ app_id           = os.getenv("PINTEREST_APP_ID")
 app_secret       = os.getenv("PINTEREST_APP_SECRET")
 notion_token     = os.getenv("NOTION_ACCESS_TOKEN")
 
-# --- Notion database IDs ---
+# --- Notion database IDs (defaults; overridden from Actor input at runtime) ---
 CONTENT_PIECES_DB = "345063a81f60806f8797dcedd3027287"
 SNAPSHOTS_DB      = "339063a81f6080a0a8ddedfcdf34fca7"
+
+# --- Tenant namespace for KV board keys (default "sol"; overridden from Actor input) ---
+tenant = "sol"
 
 # --- API settings ---
 PIN_BASE_URL  = "https://api.pinterest.com/v5"
@@ -55,7 +60,7 @@ KV_STORE_NAME = "pinterest-boards"
 # =============================================================================
 
 def refresh_access_token():
-    """Exchange refresh token for a new access token. Updates env and KV store."""
+    """Exchange refresh token for a new access token. Persists to KV under tenant-prefixed keys."""
     import base64
     creds = base64.b64encode(f"{app_id}:{app_secret}".encode()).decode()
     r = requests.post(
@@ -77,12 +82,17 @@ def refresh_access_token():
     new_refresh = data.get("refresh_token")
     if new_token:
         print("  Token refreshed successfully")
-        # Save updated tokens back to Apify KV store so next run picks them up
-        client = ApifyClient()
-        kv = client.key_value_store(KV_STORE_NAME)
-        kv.set_record("access_token", new_token)
-        if new_refresh:
-            kv.set_record("refresh_token", new_refresh)
+        # Persist under tenant-prefixed keys so multiple tenants don't clobber each other
+        try:
+            client = ApifyClient(token=Actor.configuration.token)
+            store = client.key_value_stores().get_or_create(name=KV_STORE_NAME)
+            store_id = store["id"] if isinstance(store, dict) else store.id
+            kv = client.key_value_store(store_id)
+            kv.set_record(f"{tenant}.access_token", new_token)
+            if new_refresh:
+                kv.set_record(f"{tenant}.refresh_token", new_refresh)
+        except Exception as e:
+            print(f"  KV write error during token refresh: {e}")
     return new_token
 
 
@@ -125,27 +135,53 @@ def pin_post(endpoint, payload):  # <- POST request to Pinterest API
     return r.json()
 
 
+def _board_kv_key(board_name):
+    """Returns the tenant-prefixed, KV-safe key for a board name.
+    Apify KV keys allow a-zA-Z0-9!-_.'() — colon is excluded, so use . as separator.
+    Anything not in the allowed set gets replaced with underscore."""
+    safe = re.sub(r"[^a-zA-Z0-9!_.\'()-]", '_', board_name)
+    return f"{tenant}.{safe}"
+
+
 def get_board_id(board_name):
-    """Looks up board ID from KV store. Returns None if not found."""
+    """Looks up board ID from KV store. Key is namespaced as tenant:safe_board_name.
+    Falls back to legacy bare key on miss; migrates it to the prefixed key on first hit
+    and deletes the bare key so the fallback only fires once per board."""
     client = ApifyClient(token=Actor.configuration.token)
+    kv_key = _board_kv_key(board_name)
     try:
         store = client.key_value_stores().get_or_create(name=KV_STORE_NAME)
-        store_id = store["id"]
-        record = client.key_value_store(store_id).get_record(board_name)
-        return record["value"] if record else None
+        store_id = store["id"] if isinstance(store, dict) else store.id
+        kv = client.key_value_store(store_id)
+
+        record = kv.get_record(kv_key)
+        if record:
+            return record["value"]
+
+        # Legacy bare key — migrate to prefixed key on first hit, then delete bare key
+        bare = kv.get_record(board_name)
+        if bare:
+            board_id = bare["value"]
+            print(f"  KV migrate: '{board_name}' → '{kv_key}'")
+            kv.set_record(kv_key, board_id)
+            kv.delete_record(board_name)
+            return board_id
+
+        return None
     except Exception as e:
         print(f"  KV read error: {e}")
         return None
 
 
 def save_board_to_kv(board_name, board_id):
-    """Saves a board name → ID mapping to the KV store."""
+    """Saves a board name → ID mapping to the KV store. Key is namespaced as tenant:safe_board_name."""
     client = ApifyClient(token=Actor.configuration.token)
+    kv_key = _board_kv_key(board_name)
     try:
         store = client.key_value_stores().get_or_create(name=KV_STORE_NAME)
-        store_id = store["id"]
-        client.key_value_store(store_id).set_record(board_name, board_id)
-        print(f"  KV saved: '{board_name}' → {board_id}")
+        store_id = store["id"] if isinstance(store, dict) else store.id
+        client.key_value_store(store_id).set_record(kv_key, board_id)
+        print(f"  KV saved: '{kv_key}' → {board_id}")
     except Exception as e:
         print(f"  KV write error: {e}")
 
@@ -153,12 +189,14 @@ def save_board_to_kv(board_name, board_id):
 def resolve_board_id(board_name, new_board_url):
     """
     Resolves a board name to a board ID.
-    1. Check KV store — if found, return it
-    2. If new_board_url is set, fetch board name from Pinterest API, save to KV, return ID
+    1. Check KV store under tenant:safe_board_name — if found, return it
+    2. If new_board_url is set, fetch board from Pinterest API, save to KV, return ID
     3. Otherwise return None (can't post without a board)
     """
     if not board_name:
         return None
+
+    kv_key = _board_kv_key(board_name)
 
     # Check KV store first
     board_id = get_board_id(board_name)
@@ -167,9 +205,7 @@ def resolve_board_id(board_name, new_board_url):
 
     # Unknown board — check if new_board_url was provided to register it
     if new_board_url:
-        # Extract board ID from URL e.g. https://www.pinterest.com/user/board-name/
-        # Pinterest board URLs don't expose the ID directly, so we look it up via API
-        print(f"  Unknown board '{board_name}' — fetching from Pinterest API...")
+        print(f"  Unknown board '{kv_key}' — fetching from Pinterest API...")
         data = pin_get("boards", {"page_size": 100})
         if data:
             for board in data.get("items", []):
@@ -177,9 +213,9 @@ def resolve_board_id(board_name, new_board_url):
                     found_id = board["id"]
                     save_board_to_kv(board_name, found_id)
                     return found_id
-        print(f"  Board '{board_name}' not found on Pinterest — check the name matches exactly")
+        print(f"  Board '{kv_key}' not found on Pinterest — check the name matches exactly")
     else:
-        print(f"  Board '{board_name}' not in KV store and no new_board URL provided — skipping")
+        print(f"  Board '{kv_key}' not in KV store and no new_board URL provided — skipping")
 
     return None
 
@@ -310,6 +346,7 @@ def get_scheduled_pins():  # <- gets Pinterest pieces scheduled to post today
             "dest_link":      dest_link,
             "board_name":     board_select,
             "new_board":      new_board,
+            "retry_count":    props.get("Retry count", {}).get("number") or 0,
         })
     return pins
 
@@ -367,7 +404,7 @@ def create_snapshot(notion_page_id, pin_id, title, metrics):
     return page_id is not None
 
 
-def write_run_log(status, digest, pages_touched, errors=None, metrics=None, notes=None):
+def write_run_log(status, digest, pages_touched, errors=None, metrics=None, notes=None, trigger="Schedule"):
     """Creates a page in the Agent Run Log Notion database after each run."""
     phx = timezone(timedelta(hours=-7))
     now = datetime.now(phx)
@@ -376,7 +413,7 @@ def write_run_log(status, digest, pages_touched, errors=None, metrics=None, note
     props = {
         "Run":           {"title": [{"text": {"content": run_title}}]},
         "Status":        {"select": {"name": status}},
-        "Trigger":       {"select": {"name": "Schedule"}},
+        "Trigger":       {"select": {"name": trigger}},
         "Digest":        {"rich_text": [{"text": {"content": digest}}]},
         "Pages Touched": {"number": pages_touched},
         "Completed at":  {"date": {"start": completed_at}},
@@ -400,6 +437,76 @@ def write_run_log(status, digest, pages_touched, errors=None, metrics=None, note
         return True
     print(f"  Failed to write run log: {r.status_code} {r.text}")
     return False
+
+
+# =============================================================================
+# SHARED PIN POSTING LOGIC
+# =============================================================================
+
+def _apply_retry(page_id, retry_count):
+    """On posting failure: increment retry_count. Under 3 → bump Scheduled time +5 min.
+    At 3 → set Stage=Failed so the row surfaces instead of looping silently."""
+    new_count = retry_count + 1
+    if new_count >= 3:
+        updates = {
+            "Stage":       {"status": {"name": "Killed"}},
+            "Retry count": {"number": new_count},
+        }
+        print(f"  Retry count hit {new_count} — marking Killed")
+    else:
+        bump = datetime.now(timezone.utc) + timedelta(minutes=5)
+        updates = {
+            "Retry count":   {"number": new_count},
+            "Scheduled time": {"date": {"start": bump.isoformat()}},
+        }
+        print(f"  Retry {new_count}/3 — rescheduled +5 min")
+    update_page(notion_token, page_id, updates)
+
+
+async def post_single_pin(title, media_url, caption, dest_link, board_name, new_board, page_id, retry_count):
+    """Post one pin to Pinterest and write back to Notion. Shared by batch and webhook paths.
+    On failure applies retry logic via _apply_retry()."""
+    print(f"  Posting: {title[:50]}...")
+
+    board_id = resolve_board_id(board_name, new_board)
+    if not board_id:
+        print(f"  No board ID found for '{board_name}'")
+        _apply_retry(page_id, retry_count)
+        return {"success": False}
+
+    result = publish_pin(board_id, title, caption, media_url, dest_link)
+    if not result or "id" not in result:
+        print(f"  Pinterest API returned no pin ID for '{title}'")
+        _apply_retry(page_id, retry_count)
+        return {"success": False}
+
+    pin_id    = result["id"]
+    permalink = f"https://www.pinterest.com/pin/{pin_id}/"
+
+    updates = {
+        "Stage":     {"status":    {"name": "Posted"}},
+        "Post ID":   {"rich_text": [{"text": {"content": pin_id}}]},
+        "Post link": {"url": permalink},
+        "Published": {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}},
+    }
+    if new_board:
+        updates["new_board"] = {"rich_text": []}
+
+    updated = update_page(notion_token, page_id, updates)
+    if updated:
+        print(f"  Posted ✅  Pin ID: {pin_id}")
+    else:
+        print(f"  Posted to Pinterest but Notion update failed for '{title}' — update manually")
+
+    await Actor.push_data({
+        "mode":      "post",
+        "title":     title,
+        "pin_id":    pin_id,
+        "board":     board_name,
+        "permalink": permalink,
+        "status":    "posted",
+    })
+    return {"success": True, "pin_id": pin_id, "permalink": permalink}
 
 
 # =============================================================================
@@ -505,83 +612,95 @@ async def run_post():
     success, failed = 0, 0
 
     for pin in pins:
-        title      = pin["title"]
-        media_url  = pin["media_url"]
-        caption    = pin["caption"]
-        dest_link  = pin["dest_link"]
-        board_name = pin["board_name"]
-        new_board  = pin["new_board"]
-        page_id    = pin["notion_page_id"]
-
-        print(f"  Posting: {title[:50]}...")
-
-        # Resolve board name → board ID via KV store
-        board_id = resolve_board_id(board_name, new_board)
-        if not board_id:
-            print(f"  No board ID found for '{board_name}' — skipping")
-            failed += 1
-            continue
-
-        # Post the pin
-        result = publish_pin(board_id, title, caption, media_url, dest_link)
-        if not result or "id" not in result:
-            print(f"  Failed to post '{title}'")
-            failed += 1
-            time.sleep(WRITE_DELAY)
-            continue
-
-        pin_id    = result["id"]
-        permalink = f"https://www.pinterest.com/pin/{pin_id}/"
-
-        # Write results back to Notion
-        updates = {
-            "Stage":     {"status":    {"name": "Posted"}},
-            "Post ID":   {"rich_text": [{"text": {"content": pin_id}}]},
-            "Post link": {"url": permalink},
-            "Published": {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}},
-        }
-        # Clear new_board field now that it's been registered
-        if new_board:
-            updates["new_board"] = {"rich_text": []}
-
-        updated = update_page(notion_token, page_id, updates)
-
-        if updated:
+        result = await post_single_pin(
+            pin["title"], pin["media_url"], pin["caption"],
+            pin["dest_link"], pin["board_name"], pin["new_board"],
+            pin["notion_page_id"], pin["retry_count"],
+        )
+        if result["success"]:
             success += 1
-            print(f"  Posted ✅  Pin ID: {pin_id}")
         else:
-            print(f"  Posted to Pinterest but Notion update failed for '{title}' — update manually")
             failed += 1
-
         time.sleep(WRITE_DELAY)
-
-        await Actor.push_data({
-            "mode":      "post",
-            "title":     title,
-            "pin_id":    pin_id,
-            "board":     board_name,
-            "permalink": permalink,
-            "status":    "posted",
-        })
 
     print(f"\n  ✅ {success} posted  ❌ {failed} failed")
 
 
+async def run_webhook(payload):
+    """Handle a single-pin trigger from Notion automation.
+    Payload is the raw Notion page object (properties + id + url)."""
+    print("\n=== PINTEREST WEBHOOK POST ===")
+    props   = payload.get("properties", {})
+    page_id = payload.get("id", "")
+
+    title_blocks = props.get("Piece", {}).get("title") or []
+    title        = title_blocks[0].get("plain_text", "") if title_blocks else "Untitled"
+    caption      = "".join(b.get("plain_text", "") for b in props.get("Caption", {}).get("rich_text", []))
+    board_name   = (props.get("Board", {}).get("select") or {}).get("name", "")
+    new_board    = "".join(b.get("plain_text", "") for b in props.get("new_board", {}).get("rich_text", []))
+    dest_link    = props.get("Dest. link", {}).get("url", "")
+    retry_count  = props.get("Retry count", {}).get("number") or 0
+
+    media_url = file_url(props.get("Media file", {})) or "".join(
+        b.get("plain_text", "") for b in props.get("Media link", {}).get("rich_text", [])
+    )
+
+    if not media_url:
+        print(f"  No media URL for '{title}' — cannot post")
+        return
+    if not board_name:
+        print(f"  No board selected for '{title}' — cannot post")
+        return
+
+    print(f"  Webhook trigger for: {title[:60]}")
+    await post_single_pin(title, media_url, caption, dest_link, board_name, new_board, page_id, retry_count)
+
+
 async def main() -> None:
     async with Actor:
-        if not pinterest_token:
-            print("ERROR: PINTEREST_ACCESS_TOKEN missing")
+        actor_input = await Actor.get_input() or {}
+
+        # Resolve credentials: input takes priority, env var is the fallback.
+        # This lets per-Task input override the shared actor env vars without
+        # requiring any changes to Sol's existing setup (which supplies env vars only).
+        resolved_pin_token = actor_input.get("pinterest_access_token") or pinterest_token
+        resolved_ref_token = actor_input.get("pinterest_refresh_token") or refresh_token
+        resolved_not_token = actor_input.get("notion_access_token") or notion_token
+        globals()["pinterest_token"] = resolved_pin_token
+        globals()["refresh_token"]   = resolved_ref_token
+        globals()["notion_token"]    = resolved_not_token
+        globals()["NOTION_HEADERS"]  = {
+            "Authorization":  f"Bearer {resolved_not_token}",
+            "Content-Type":   "application/json",
+            "Notion-Version": "2022-06-28",
+        }
+
+        if not resolved_pin_token:
+            print("ERROR: pinterest_access_token missing (set in Actor input or PINTEREST_ACCESS_TOKEN env var)")
             return
-        if not notion_token:
-            print("ERROR: NOTION_ACCESS_TOKEN missing")
+        if not resolved_not_token:
+            print("ERROR: notion_access_token missing (set in Actor input or NOTION_ACCESS_TOKEN env var)")
             return
 
-        actor_input = await Actor.get_input() or {}
-        mode = actor_input.get("mode", "snapshot")
+        # Override module-level config from input — follows the same globals() pattern
+        # used by pin_get/pin_post for token refresh, so all callsites pick up the value.
+        globals()["CONTENT_PIECES_DB"] = actor_input.get("content_pieces_db", CONTENT_PIECES_DB)
+        globals()["SNAPSHOTS_DB"]      = actor_input.get("snapshots_db", SNAPSHOTS_DB)
+        globals()["tenant"]            = actor_input.get("tenant", tenant)
+
+        # Notion automation payloads carry "properties" at top level; manual batch runs use "mode"
+        if "properties" in actor_input:
+            mode = "webhook"
+        else:
+            mode = actor_input.get("mode", "snapshot")
+
+        trigger = "Webhook" if mode == "webhook" else "Schedule"
 
         error_msg: str | None = None
         try:
-            if mode == "both":
+            if mode == "webhook":
+                await run_webhook(actor_input)
+            elif mode == "both":
                 await run_post()
                 await run_snapshot()
             elif mode == "snapshot":
@@ -590,7 +709,7 @@ async def main() -> None:
                 await run_post()
             else:
                 await Actor.push_data({"mode": "error", "message": f"Unknown mode: '{mode}'"})
-                print(f"Unknown mode: '{mode}'. Use snapshot, post, or both.")
+                print(f"Unknown mode: '{mode}'. Use snapshot, post, both, or webhook.")
         except Exception as exc:
             error_msg = str(exc)
             raise
@@ -601,4 +720,5 @@ async def main() -> None:
                     digest=f"mode={mode}",
                     pages_touched=0,
                     errors=error_msg,
+                    trigger=trigger,
                 )

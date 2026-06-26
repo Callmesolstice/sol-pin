@@ -1,0 +1,55 @@
+{
+    "title": "sol-pin input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "mode": {
+            "title": "Mode",
+            "type": "string",
+            "description": "Run mode: post, snapshot, both, or webhook.",
+            "default": "snapshot",
+            "enum": ["post", "snapshot", "both", "webhook"],
+            "enumTitles": ["Post", "Snapshot", "Both", "Webhook"]
+        },
+        "content_pieces_db": {
+            "title": "Content Pieces DB",
+            "type": "string",
+            "description": "Notion database ID for Content Pieces. Defaults to Sol's database.",
+            "default": "345063a81f60806f8797dcedd3027287"
+        },
+        "snapshots_db": {
+            "title": "Snapshots DB",
+            "type": "string",
+            "description": "Notion database ID for Post Snapshots. Defaults to Sol's database.",
+            "default": "339063a81f6080a0a8ddedfcdf34fca7"
+        },
+        "tenant": {
+            "title": "Tenant",
+            "type": "string",
+            "description": "Tenant identifier used to namespace KV store board keys (e.g. sol, olive). Defaults to sol.",
+            "default": "sol"
+        },
+        "pinterest_access_token": {
+            "title": "Pinterest Access Token",
+            "type": "string",
+            "description": "Pinterest OAuth access token. Falls back to PINTEREST_ACCESS_TOKEN env var if omitted.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "pinterest_refresh_token": {
+            "title": "Pinterest Refresh Token",
+            "type": "string",
+            "description": "Pinterest OAuth refresh token. Falls back to PINTEREST_REFRESH_TOKEN env var if omitted.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "notion_access_token": {
+            "title": "Notion Access Token",
+            "type": "string",
+            "description": "Notion integration token. Falls back to NOTION_ACCESS_TOKEN env var if omitted.",
+            "editor": "textfield",
+            "isSecret": true
+        }
+    },
+    "required": []
+}

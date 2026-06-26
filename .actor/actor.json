@@ -8,7 +8,8 @@
     "buildTag": "latest",
     "meta": {
         "templateId": "python-empty",
-        "generatedBy": "<FILL-IN-MODEL>"
+        "generatedBy": "Claude Code with Claude Sonnet 4.6"
     },
-    "dockerfile": "../Dockerfile"
+    "dockerfile": "../Dockerfile",
+    "input": "./input_schema.json"
 }
