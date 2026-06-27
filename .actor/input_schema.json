@@ -7,6 +7,7 @@
             "title": "Mode",
             "type": "string",
             "description": "Run mode: post, snapshot, both, or webhook.",
+            "editor": "select",
             "default": "snapshot",
             "enum": ["post", "snapshot", "both", "webhook"],
             "enumTitles": ["Post", "Snapshot", "Both", "Webhook"]
@@ -15,18 +16,21 @@
             "title": "Content Pieces DB",
             "type": "string",
             "description": "Notion database ID for Content Pieces. Defaults to Sol's database.",
+            "editor": "textfield",
             "default": "345063a81f60806f8797dcedd3027287"
         },
         "snapshots_db": {
             "title": "Snapshots DB",
             "type": "string",
             "description": "Notion database ID for Post Snapshots. Defaults to Sol's database.",
+            "editor": "textfield",
             "default": "339063a81f6080a0a8ddedfcdf34fca7"
         },
         "tenant": {
             "title": "Tenant",
             "type": "string",
             "description": "Tenant identifier used to namespace KV store board keys (e.g. sol, olive). Defaults to sol.",
+            "editor": "textfield",
             "default": "sol"
         },
         "pinterest_access_token": {
