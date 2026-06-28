@@ -8,4 +8,6 @@ export interface Env {
 	OLIVE_NOTION_ACCESS_TOKEN: string;
 	PINTEREST_APP_ID: string;
 	PINTEREST_APP_SECRET: string;
+	// Shared secret gating the manual fetch() trigger (crons don't use it).
+	TRIGGER_SECRET: string;
 }

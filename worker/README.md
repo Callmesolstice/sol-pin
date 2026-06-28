@@ -45,10 +45,20 @@ wrangler secret put SOL_NOTION_ACCESS_TOKEN
 wrangler secret put OLIVE_NOTION_ACCESS_TOKEN
 wrangler secret put PINTEREST_APP_ID
 wrangler secret put PINTEREST_APP_SECRET
+wrangler secret put TRIGGER_SECRET   # gates the manual fetch() trigger
 ```
 
 Pinterest access/refresh tokens are **not** secrets — they live in `OAUTH_TOKENS` KV under
 `<state>:pinterest_tokens` and are refreshed in place on a 401.
+
+## Manual trigger (auth)
+
+Cron runs need nothing. The manual `fetch()` trigger requires `TRIGGER_SECRET`, passed as
+`?token=` or the `X-Trigger-Token` header:
+
+```sh
+curl "https://sol-pin-worker.big-sol.workers.dev/?mode=snapshot&token=$TRIGGER_SECRET"
+```
 
 ## Develop
 

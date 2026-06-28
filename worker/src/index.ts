@@ -30,7 +30,13 @@ export default {
 	},
 
 	async fetch(req: Request, env: Env): Promise<Response> {
-		const mode = new URL(req.url).searchParams.get("mode");
+		const url = new URL(req.url);
+		// Gate the manual trigger: token via ?token= or "X-Trigger-Token" header.
+		const token = url.searchParams.get("token") ?? req.headers.get("x-trigger-token");
+		if (!env.TRIGGER_SECRET || token !== env.TRIGGER_SECRET) {
+			return new Response("Unauthorized", { status: 401 });
+		}
+		const mode = url.searchParams.get("mode");
 		if (mode !== "post" && mode !== "snapshot") {
 			return new Response("Pass ?mode=post or ?mode=snapshot", { status: 400 });
 		}
