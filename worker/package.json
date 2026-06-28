@@ -1,0 +1,17 @@
+{
+  "name": "sol-pin-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinterest <-> Notion sync (post + snapshot) as a Cloudflare Worker. Port of the sol-pin Apify actor.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:scheduled": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240620.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.114.0"
+  }
+}

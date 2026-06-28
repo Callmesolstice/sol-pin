@@ -1,0 +1,42 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "sol-pin-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-06-26",
+	// global_fetch_strictly_public: all outbound fetches (Pinterest, Notion, Cloudinary
+	// media) are public internet — matches the pinterest-oauth-worker config.
+	"compatibility_flags": ["global_fetch_strictly_public"],
+
+	// Two cron schedules. scheduled() dispatches on event.cron:
+	//   */30 * * * *  -> post mode    (publish anything Scheduled and due)
+	//   0 */6 * * *   -> snapshot mode (pull analytics on the graduated schedule)
+	"triggers": {
+		"crons": ["*/30 * * * *", "0 */6 * * *"]
+	},
+
+	"kv_namespaces": [
+		// Reused from the existing pinterest-oauth-worker. Holds key
+		// "sol:pinterest_tokens" -> { access_token, refresh_token, expires_in, stored_at }.
+		{
+			"binding": "OAUTH_TOKENS",
+			"id": "3cc8911e6d68407cbc7f0eafeb978bc0"
+		},
+		// New namespace, same shape as the Apify "pinterest-boards" KV store.
+		// Key "sol.<sanitized_board_name>" -> board id string.
+		// Replace the placeholder id after `wrangler kv namespace create PINTEREST_BOARDS`.
+		{
+			"binding": "PINTEREST_BOARDS",
+			"id": "REPLACE_WITH_PINTEREST_BOARDS_KV_ID"
+		}
+	],
+
+	// Secrets (set with `wrangler secret put`, never in this file):
+	//   NOTION_ACCESS_TOKEN, PINTEREST_APP_ID, PINTEREST_APP_SECRET
+	// Pinterest access/refresh tokens come from the OAUTH_TOKENS KV, not from secrets.
+
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true
+}
