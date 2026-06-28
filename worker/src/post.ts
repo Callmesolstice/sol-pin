@@ -48,7 +48,7 @@ async function postSinglePin(
 ): Promise<boolean> {
 	console.log(`  Posting: ${pin.title.slice(0, 50)}...`);
 
-	const boardId = await resolveBoardId(env, account, pinterest, pin.boardName, pin.newBoard);
+	const boardId = await resolveBoardId(env, account, pinterest, notion, pin.notionPageId, pin.boardName, pin.newBoard);
 	if (!boardId) {
 		console.log(`  No board ID for '${pin.boardName}'`);
 		await applyRetry(notion, pin.notionPageId, pin.retryCount);
@@ -77,14 +77,18 @@ async function postSinglePin(
 	return true;
 }
 
-// Board name -> board id. KV first; on a miss with new_board set, look the board up on
-// Pinterest by name and cache it. Key shape matches the Apify pinterest-boards store.
+// Board name -> board id. KV first (boards are prefilled per account). On a miss, the
+// new_board property holds a LINK to the board: parse it, confirm the board exists on
+// Pinterest, correct the Board option name if it's off, and cache the mapping so future
+// pins skip the lookup. Key shape matches the Apify pinterest-boards store.
 async function resolveBoardId(
 	env: Env,
 	account: Account,
 	pinterest: PinterestClient,
+	notion: NotionClient,
+	pageId: string,
 	boardName: string,
-	newBoard: string | null,
+	newBoardLink: string | null,
 ): Promise<string | null> {
 	if (!boardName) return null;
 	const key = boardKvKey(account.boardTenant, boardName);
@@ -92,20 +96,59 @@ async function resolveBoardId(
 	const cached = await env.PINTEREST_BOARDS.get(key);
 	if (cached) return cached;
 
-	if (newBoard) {
-		console.log(`  Unknown board '${key}' — fetching from Pinterest API...`);
-		const boards = await pinterest.getBoards();
-		const match = boards.find((b) => b.name.trim().toLowerCase() === boardName.trim().toLowerCase());
-		if (match) {
-			await env.PINTEREST_BOARDS.put(key, match.id);
-			console.log(`  KV saved: '${key}' -> ${match.id}`);
-			return match.id;
-		}
-		console.log(`  Board '${key}' not found on Pinterest — check the name matches exactly`);
-	} else {
-		console.log(`  Board '${key}' not in KV and no new_board provided — skipping`);
+	if (!newBoardLink) {
+		console.log(`  Board '${key}' not in KV and no new_board link — skipping`);
+		return null;
 	}
-	return null;
+
+	console.log(`  New board for '${key}' — verifying from link...`);
+	const slug = await boardSlugFromLink(newBoardLink);
+	const boards = await pinterest.getBoards();
+	// Match the link's board slug against each board's normalized name; fall back to the
+	// Board option name in case the link can't be parsed.
+	const match =
+		(slug && boards.find((b) => normalizeName(b.name) === slug)) ||
+		boards.find((b) => b.name.trim().toLowerCase() === boardName.trim().toLowerCase());
+	if (!match) {
+		console.log(`  Could not verify a board from new_board link (Board='${boardName}')`);
+		return null;
+	}
+
+	// Correct the Board option in Notion if its name doesn't match Pinterest's.
+	let finalKey = key;
+	if (match.name !== boardName) {
+		console.log(`  Correcting Board '${boardName}' -> '${match.name}'`);
+		await notion.updatePage(pageId, { Board: { select: { name: match.name } } });
+		finalKey = boardKvKey(account.boardTenant, match.name);
+	}
+
+	await env.PINTEREST_BOARDS.put(finalKey, match.id);
+	console.log(`  KV saved: '${finalKey}' -> ${match.id}`);
+	return match.id;
+}
+
+// Pull the board slug out of a Pinterest board link, following a pin.it short link to its
+// canonical URL first. Returns a normalized slug (lowercase, alphanumerics only).
+async function boardSlugFromLink(link: string): Promise<string | null> {
+	try {
+		let url = new URL(link.trim());
+		if (url.hostname.includes("pin.it")) {
+			const res = await fetch(link, { redirect: "follow" });
+			url = new URL(res.url);
+		}
+		// Pinterest board URLs look like /<user>/<board-slug>/ — take the 2nd path segment.
+		const segs = url.pathname.split("/").filter(Boolean);
+		const slug = segs.length >= 2 ? segs[1] : segs[0];
+		return slug ? normalizeName(slug) : null;
+	} catch {
+		return null;
+	}
+}
+
+// Normalize a board name or url slug for comparison: lowercase, strip non-alphanumerics.
+// e.g. "solstice.png" and the url slug "solsticepng" both become "solsticepng".
+function normalizeName(s: string): string {
+	return s.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 // On failure: bump Retry count. Under the cap, reschedule +5 min; at the cap, mark Killed

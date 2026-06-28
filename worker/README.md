@@ -35,6 +35,21 @@ prefix), its board-key tenant, and which Notion workspace token it uses. The act
 is `SOL` (token state `sol-test`, Notion token `SOL_NOTION_ACCESS_TOKEN`). Add `olive`
 similarly and map a cron to it to run a second account.
 
+## Boards & adding a new one
+
+`PINTEREST_BOARDS` KV maps `<tenant>.<sanitized_board_name>` → board id. A pin posts to the
+board named in its `Board` select. Known boards are prefilled, so most pins just need
+`Board` set.
+
+To add a board the worker doesn't know yet:
+
+1. Add an option to the `Board` property matching the new board's name, and select it.
+2. Paste the **link to the board** (e.g. `https://www.pinterest.com/<user>/<board>/` or a
+   `pin.it` short link) into the `new_board` property.
+3. On the next post run the worker parses the link, confirms the board exists on Pinterest,
+   **corrects the `Board` option name** if it's slightly off, caches the mapping in KV, and
+   clears `new_board`. Future pins to that board need only `Board`.
+
 ## Secrets
 
 Notion tokens are per-workspace. Locally they live in `worker/.dev.vars` (gitignored); in
