@@ -1,6 +1,6 @@
 import type { Env } from "./env";
-import { SOL, type Account } from "./account";
-import { NotionClient } from "./notion";
+import { ACCOUNTS, RUN_LOG, type Account } from "./account";
+import { writeRunLog } from "./notion";
 import { runPost, type RunResult } from "./post";
 import { runSnapshot } from "./snapshot";
 
@@ -25,8 +25,8 @@ export default {
 			console.error(`No mode mapped for cron "${event.cron}"`);
 			return;
 		}
-		// waitUntil so the run-log write isn't cut off when scheduled() returns.
-		ctx.waitUntil(runMode(env, mode, "Schedule", SOL));
+		// waitUntil so the run-log writes aren't cut off when scheduled() returns.
+		ctx.waitUntil(runAllAccounts(env, mode, "Schedule"));
 	},
 
 	async fetch(req: Request, env: Env): Promise<Response> {
@@ -34,10 +34,25 @@ export default {
 		if (mode !== "post" && mode !== "snapshot") {
 			return new Response("Pass ?mode=post or ?mode=snapshot", { status: 400 });
 		}
-		const result = await runMode(env, mode, "Manual", SOL);
-		return Response.json({ mode, ...result });
+		const results = await runAllAccounts(env, mode, "Manual");
+		return Response.json({ mode, results });
 	},
 } satisfies ExportedHandler<Env>;
+
+// Run a mode for every configured account, one at a time (one shared Pinterest app,
+// so keep concurrency low). Each account writes its own run-log row in its own workspace.
+async function runAllAccounts(env: Env, mode: Mode, trigger: "Schedule" | "Manual") {
+	const results: Array<{ account: string; result: RunResult }> = [];
+	for (const account of ACCOUNTS) {
+		// Snapshot mode needs a Post Snapshots DB; skip accounts that don't have one.
+		if (mode === "snapshot" && !account.dbs.snapshots) {
+			console.log(`Skipping snapshot for ${account.tokenState} — no snapshots DB`);
+			continue;
+		}
+		results.push({ account: account.tokenState, result: await runMode(env, mode, trigger, account) });
+	}
+	return results;
+}
 
 // Run one mode for one account, then always write the run log (mirrors the Python
 // actor's try/finally).
@@ -53,9 +68,9 @@ async function runMode(env: Env, mode: Mode, trigger: "Schedule" | "Manual", acc
 	} finally {
 		const metrics = JSON.stringify({ duration_ms: Date.now() - started, ...result });
 		try {
-			await new NotionClient(account.notionToken(env)).writeRunLog({
+			await writeRunLog(RUN_LOG.token(env), RUN_LOG.db, {
 				status: error ? "Failed" : "Success",
-				digest: `mode=${mode}`,
+				digest: `mode=${mode} account=${account.tokenState}`,
 				pagesTouched: result.processed,
 				errors: error,
 				metrics,

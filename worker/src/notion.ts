@@ -2,22 +2,24 @@
 // Notion API client. Owns exactly one external API (api.notion.com/v1).
 //
 // Ports the SolOSDK helpers sol-pin used (query_db, create_page, update_page, file_url)
-// plus the actor's own Notion-shaped queries and writers. Database IDs live here as
-// consts (mirrors the Python module constants) — no env vars.
+// plus the actor's own Notion-shaped queries and writers. Database IDs are per-account
+// (each Pinterest account has its own Notion workspace) — see account.ts. No env vars.
 // =============================================================================
 
 const NOTION_BASE = "https://api.notion.com/v1";
 const NOTION_VERSION = "2022-06-28";
 
-// Database IDs (Python defaults). RUN_LOG_DB is the real database id — REST
-// parent.database_id wants the database id, not the data-source/collection id.
-const CONTENT_PIECES_DB = "345063a81f60806f8797dcedd3027287";
-const SNAPSHOTS_DB = "339063a81f6080a0a8ddedfcdf34fca7";
-const RUN_LOG_DB = "377063a8-1f60-8004-bb99-ec5fcda1082a";
-
 // Live Post Snapshots schema names the content-piece relation "→ Content piece"
 // (arrow-prefixed), not "Content piece" as the Python actor assumed.
 const SNAPSHOT_RELATION = "→ Content piece";
+
+// The content databases one account reads/writes in its own Notion workspace. The Agent
+// Run Log is NOT here — it's a single personal monitoring DB shared across all accounts
+// (see writeRunLog / RUN_LOG in account.ts).
+export interface NotionDbs {
+	contentPieces: string;
+	snapshots?: string; // omitted for accounts with no Post Snapshots DB (they skip snapshot mode)
+}
 
 // --- Notion property shapes we read off Content Pieces / Snapshots ---
 interface RichTextItem {
@@ -55,14 +57,15 @@ export interface PostedPin {
 }
 
 export class NotionClient {
-	constructor(private token: string) {}
+	constructor(
+		private token: string,
+		private dbs: NotionDbs,
+		// Content-piece title property name — "Piece" for sol, "Title" for olive.
+		private titleProp: string,
+	) {}
 
 	private headers(): HeadersInit {
-		return {
-			Authorization: `Bearer ${this.token}`,
-			"Content-Type": "application/json",
-			"Notion-Version": NOTION_VERSION,
-		};
+		return notionHeaders(this.token);
 	}
 
 	// Fully paginated query with any Notion filter (+ optional sorts).
@@ -113,7 +116,7 @@ export class NotionClient {
 
 	async getScheduledPins(): Promise<ScheduledPin[]> {
 		const today = new Date().toISOString().slice(0, 10);
-		const pages = await this.queryDb(CONTENT_PIECES_DB, {
+		const pages = await this.queryDb(this.dbs.contentPieces, {
 			and: [
 				{ property: "Platform", select: { equals: "Pinterest" } },
 				{ property: "Stage", status: { equals: "Scheduled" } },
@@ -125,7 +128,7 @@ export class NotionClient {
 		const pins: ScheduledPin[] = [];
 		for (const page of pages) {
 			const p = page.properties;
-			const title = plainText(p.Piece?.title) || "Untitled";
+			const title = plainText(p[this.titleProp]?.title) || "Untitled";
 			// Media file (Files & media) preferred; fall back to Media link (rich_text).
 			const mediaUrl = fileUrl(p["Media file"]) ?? plainText(p["Media link"]?.rich_text) ?? "";
 			const boardName = p.Board?.select?.name ?? "";
@@ -153,7 +156,7 @@ export class NotionClient {
 	}
 
 	async getPostedPins(): Promise<PostedPin[]> {
-		const pages = await this.queryDb(CONTENT_PIECES_DB, {
+		const pages = await this.queryDb(this.dbs.contentPieces, {
 			and: [
 				{ property: "Platform", select: { equals: "Pinterest" } },
 				{ property: "Stage", status: { equals: "Posted" } },
@@ -169,7 +172,7 @@ export class NotionClient {
 			pins.push({
 				notionPageId: page.id,
 				pinId: rt[0].plain_text,
-				title: plainText(p.Piece?.title) || "Untitled",
+				title: plainText(p[this.titleProp]?.title) || "Untitled",
 				published: p.Published?.date?.start ?? null,
 				lastShot: p["Last shot"]?.date?.start ?? null,
 			});
@@ -180,8 +183,9 @@ export class NotionClient {
 	// Previous snapshot totals for delta calc. Sort by Created time desc, take the latest
 	// (fidelity-safe vs the Python actor's reliance on unsorted [-1]).
 	async getLastSnapshot(notionPageId: string): Promise<Record<string, number>> {
+		if (!this.dbs.snapshots) return {};
 		const results = await this.queryDb(
-			SNAPSHOTS_DB,
+			this.dbs.snapshots,
 			{ property: SNAPSHOT_RELATION, relation: { contains: notionPageId } },
 			[{ timestamp: "created_time", direction: "descending" }],
 		);
@@ -197,6 +201,8 @@ export class NotionClient {
 	}
 
 	async createSnapshot(notionPageId: string, title: string, metrics: Record<string, number>): Promise<boolean> {
+		const snapshotsDb = this.dbs.snapshots;
+		if (!snapshotsDb) return false; // account has no Post Snapshots DB
 		const snapshotTitle = `${title} — ${new Date().toISOString().slice(0, 10)}`;
 		const prev = await this.getLastSnapshot(notionPageId);
 
@@ -221,42 +227,65 @@ export class NotionClient {
 			out_klk_dt: { number: outbound - (prev.outbound ?? 0) },
 			comments_dt: { number: comments - (prev.comments ?? 0) },
 		};
-		return (await this.createPage(SNAPSHOTS_DB, props)) !== null;
+		return (await this.createPage(snapshotsDb, props)) !== null;
 	}
 
-	// --- Agent Run Log ---
+}
 
-	async writeRunLog(opts: {
+// --- Agent Run Log (personal monitoring layer, shared across accounts) ---
+//
+// Standalone on purpose: it's written with a fixed monitoring token to one fixed DB,
+// independent of which account's content workspace produced the run.
+export async function writeRunLog(
+	token: string,
+	runLogDb: string,
+	opts: {
 		status: "Success" | "Failed";
 		digest: string;
 		pagesTouched: number;
 		errors?: string | null;
 		metrics?: string | null;
 		trigger?: "Schedule" | "Manual";
-	}): Promise<boolean> {
-		// Completed at is America/Phoenix (UTC-7, no DST), matching the Python actor.
-		const phx = new Date(Date.now() - 7 * 3600 * 1000);
-		const completedAt = phx.toISOString().replace("Z", "-07:00");
-		const runTitle = `sol-pin run — ${formatPhoenix(phx)}`;
+	},
+): Promise<boolean> {
+	// Completed at is America/Phoenix (UTC-7, no DST), matching the Python actor.
+	const phx = new Date(Date.now() - 7 * 3600 * 1000);
+	const completedAt = phx.toISOString().replace("Z", "-07:00");
+	const runTitle = `sol-pin run — ${formatPhoenix(phx)}`;
 
-		const props: NotionProps = {
-			Run: { title: [{ text: { content: runTitle } }] },
-			Status: { select: { name: opts.status } },
-			Trigger: { select: { name: opts.trigger ?? "Schedule" } },
-			Digest: { rich_text: [{ text: { content: opts.digest } }] },
-			"Pages Touched": { number: opts.pagesTouched },
-			"Completed at": { date: { start: completedAt } },
-		};
-		if (opts.errors) props.Errors = { rich_text: [{ text: { content: opts.errors.slice(0, 2000) } }] };
-		if (opts.metrics) props.Metrics = { rich_text: [{ text: { content: opts.metrics } }] };
+	const props: NotionProps = {
+		Run: { title: [{ text: { content: runTitle } }] },
+		Status: { select: { name: opts.status } },
+		Trigger: { select: { name: opts.trigger ?? "Schedule" } },
+		Digest: { rich_text: [{ text: { content: opts.digest } }] },
+		"Pages Touched": { number: opts.pagesTouched },
+		"Completed at": { date: { start: completedAt } },
+	};
+	if (opts.errors) props.Errors = { rich_text: [{ text: { content: opts.errors.slice(0, 2000) } }] };
+	if (opts.metrics) props.Metrics = { rich_text: [{ text: { content: opts.metrics } }] };
 
-		const ok = (await this.createPage(RUN_LOG_DB, props)) !== null;
-		if (ok) console.log(`Run log entry created: ${runTitle}`);
-		return ok;
+	const res = await fetch(`${NOTION_BASE}/pages`, {
+		method: "POST",
+		headers: notionHeaders(token),
+		body: JSON.stringify({ parent: { database_id: runLogDb }, properties: props }),
+	});
+	if (!res.ok) {
+		console.error(`Run log write failed: ${res.status} ${await res.text()}`);
+		return false;
 	}
+	console.log(`Run log entry created: ${runTitle}`);
+	return true;
 }
 
 // --- helpers (ported from SolOSDK file_url / plain-text extraction) ---
+
+function notionHeaders(token: string): HeadersInit {
+	return {
+		Authorization: `Bearer ${token}`,
+		"Content-Type": "application/json",
+		"Notion-Version": NOTION_VERSION,
+	};
+}
 
 export function fileUrl(filesProp: any): string | null {
 	const files: NotionFile[] = filesProp?.files ?? [];

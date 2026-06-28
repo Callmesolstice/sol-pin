@@ -18,7 +18,7 @@ const HOUR = 3600 * 1000;
 
 export async function runSnapshot(env: Env, account: Account): Promise<RunResult> {
 	console.log("=== PINTEREST SNAPSHOT ===");
-	const notion = new NotionClient(account.notionToken(env));
+	const notion = new NotionClient(account.notionToken(env), account.dbs, account.titleProp);
 	const pinterest = await PinterestClient.create(env, account.tokenState);
 
 	const pins = await notion.getPostedPins();

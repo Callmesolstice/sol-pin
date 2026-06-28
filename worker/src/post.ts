@@ -21,7 +21,7 @@ export interface RunResult {
 
 export async function runPost(env: Env, account: Account): Promise<RunResult> {
 	console.log("=== PINTEREST POST ===");
-	const notion = new NotionClient(account.notionToken(env));
+	const notion = new NotionClient(account.notionToken(env), account.dbs, account.titleProp);
 	const pinterest = await PinterestClient.create(env, account.tokenState);
 
 	const pins = await notion.getScheduledPins();
