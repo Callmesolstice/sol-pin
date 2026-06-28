@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import type { Account } from "./account";
 import { NotionClient } from "./notion";
 import { PinterestClient } from "./pinterest";
 import type { RunResult } from "./post";
@@ -15,10 +16,10 @@ const ANALYTICS_LAG_DAYS = 2;
 const DAY = 24 * 3600 * 1000;
 const HOUR = 3600 * 1000;
 
-export async function runSnapshot(env: Env): Promise<RunResult> {
+export async function runSnapshot(env: Env, account: Account): Promise<RunResult> {
 	console.log("=== PINTEREST SNAPSHOT ===");
-	const notion = new NotionClient(env.NOTION_ACCESS_TOKEN);
-	const pinterest = await PinterestClient.create(env);
+	const notion = new NotionClient(account.notionToken(env));
+	const pinterest = await PinterestClient.create(env, account.tokenState);
 
 	const pins = await notion.getPostedPins();
 	console.log(`  ${pins.length} posted pins found`);

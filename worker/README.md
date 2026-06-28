@@ -28,15 +28,27 @@ Every run (success or failure) writes a row to the **Agent Run Log** Notion DB.
   on a 401, refreshes and writes the new tokens **back to the same key**.
 - KV `PINTEREST_BOARDS` — board-name → board-id map. Key `sol.<sanitized_board_name>` → id.
 
+## Accounts
+
+Each Pinterest account is one entry in `src/account.ts`: its OAuth token state (KV key
+prefix), its board-key tenant, and which Notion workspace token it uses. The active account
+is `SOL` (token state `sol-test`, Notion token `SOL_NOTION_ACCESS_TOKEN`). Add `olive`
+similarly and map a cron to it to run a second account.
+
 ## Secrets
 
+Notion tokens are per-workspace. Locally they live in `worker/.dev.vars` (gitignored); in
+production set them with `wrangler secret put`:
+
 ```sh
-wrangler secret put NOTION_ACCESS_TOKEN
+wrangler secret put SOL_NOTION_ACCESS_TOKEN
+wrangler secret put OLIVE_NOTION_ACCESS_TOKEN
 wrangler secret put PINTEREST_APP_ID
 wrangler secret put PINTEREST_APP_SECRET
 ```
 
-Pinterest access/refresh tokens are **not** secrets — they live in `OAUTH_TOKENS` KV.
+Pinterest access/refresh tokens are **not** secrets — they live in `OAUTH_TOKENS` KV under
+`<state>:pinterest_tokens` and are refreshed in place on a 401.
 
 ## Develop
 

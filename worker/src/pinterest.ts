@@ -10,7 +10,6 @@ import type { Env } from "./env";
 // =============================================================================
 
 const PIN_BASE_URL = "https://api.pinterest.com/v5";
-const TOKEN_KV_KEY = "sol:pinterest_tokens";
 
 // Analytics pulled per pin. Date-range based (not lifetime) — summed per window each run.
 export const PIN_METRICS = "IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK,TOTAL_COMMENTS";
@@ -56,21 +55,24 @@ interface AnalyticsResponse {
 // is visible to every later call, mirroring the Python actor's globals() token swap.
 export class PinterestClient {
 	private env: Env;
+	private kvKey: string; // OAUTH_TOKENS key for this account's tokens
 	private accessToken: string;
 	private refreshToken: string;
 
-	private constructor(env: Env, tokens: StoredTokens) {
+	private constructor(env: Env, kvKey: string, tokens: StoredTokens) {
 		this.env = env;
+		this.kvKey = kvKey;
 		this.accessToken = tokens.access_token;
 		this.refreshToken = tokens.refresh_token;
 	}
 
-	static async create(env: Env): Promise<PinterestClient> {
-		const tokens = await env.OAUTH_TOKENS.get<StoredTokens>(TOKEN_KV_KEY, "json");
+	static async create(env: Env, tokenState: string): Promise<PinterestClient> {
+		const kvKey = `${tokenState}:pinterest_tokens`;
+		const tokens = await env.OAUTH_TOKENS.get<StoredTokens>(kvKey, "json");
 		if (!tokens?.access_token) {
-			throw new Error(`No Pinterest tokens in OAUTH_TOKENS KV under "${TOKEN_KV_KEY}"`);
+			throw new Error(`No Pinterest tokens in OAUTH_TOKENS KV under "${kvKey}"`);
 		}
-		return new PinterestClient(env, tokens);
+		return new PinterestClient(env, kvKey, tokens);
 	}
 
 	// Exchange the refresh token for a new access token; persist back to OAUTH_TOKENS.
@@ -105,8 +107,8 @@ export class PinterestClient {
 			stored_at: new Date().toISOString(),
 		};
 		try {
-			await this.env.OAUTH_TOKENS.put(TOKEN_KV_KEY, JSON.stringify(updated));
-			console.log("Pinterest token refreshed and written back to OAUTH_TOKENS");
+			await this.env.OAUTH_TOKENS.put(this.kvKey, JSON.stringify(updated));
+			console.log(`Pinterest token refreshed and written back to OAUTH_TOKENS["${this.kvKey}"]`);
 		} catch (err) {
 			// Refresh still succeeded in memory; this run can proceed.
 			console.error(`KV write-back failed after refresh: ${err}`);

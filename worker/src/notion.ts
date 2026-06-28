@@ -9,11 +9,15 @@
 const NOTION_BASE = "https://api.notion.com/v1";
 const NOTION_VERSION = "2022-06-28";
 
-// Database IDs (Python defaults). Run Log uses the data-source/collection id, which is what
-// the Python actor writes to and what Notion's REST parent.database_id accepts.
+// Database IDs (Python defaults). RUN_LOG_DB is the real database id — REST
+// parent.database_id wants the database id, not the data-source/collection id.
 const CONTENT_PIECES_DB = "345063a81f60806f8797dcedd3027287";
 const SNAPSHOTS_DB = "339063a81f6080a0a8ddedfcdf34fca7";
-const RUN_LOG_DB = "68f1a012-a784-4da7-9e4b-ea22571f3807";
+const RUN_LOG_DB = "377063a8-1f60-8004-bb99-ec5fcda1082a";
+
+// Live Post Snapshots schema names the content-piece relation "→ Content piece"
+// (arrow-prefixed), not "Content piece" as the Python actor assumed.
+const SNAPSHOT_RELATION = "→ Content piece";
 
 // --- Notion property shapes we read off Content Pieces / Snapshots ---
 interface RichTextItem {
@@ -178,7 +182,7 @@ export class NotionClient {
 	async getLastSnapshot(notionPageId: string): Promise<Record<string, number>> {
 		const results = await this.queryDb(
 			SNAPSHOTS_DB,
-			{ property: "Content piece", relation: { contains: notionPageId } },
+			{ property: SNAPSHOT_RELATION, relation: { contains: notionPageId } },
 			[{ timestamp: "created_time", direction: "descending" }],
 		);
 		if (!results.length) return {};
@@ -205,7 +209,7 @@ export class NotionClient {
 		const props = {
 			Piece: { title: [{ text: { content: snapshotTitle } }] },
 			Platform: { select: { name: "Pinterest" } },
-			"Content piece": { relation: [{ id: notionPageId }] },
+			[SNAPSHOT_RELATION]: { relation: [{ id: notionPageId }] },
 			Impressions: { number: impressions },
 			Saves: { number: saves },
 			"Pin clicks": { number: pinClicks },

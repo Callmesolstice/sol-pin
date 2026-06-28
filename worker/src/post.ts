@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import type { Account } from "./account";
 import { NotionClient, type ScheduledPin } from "./notion";
 import { PinterestClient } from "./pinterest";
 
@@ -8,7 +9,6 @@ import { PinterestClient } from "./pinterest";
 // result back to Notion. Retries / kills on failure, mirroring the Python actor.
 // =============================================================================
 
-const TENANT = "sol";
 const WRITE_DELAY_MS = 350; // ~3 Notion writes/sec
 const MAX_RETRIES = 3;
 
@@ -19,17 +19,17 @@ export interface RunResult {
 	skipped: number;
 }
 
-export async function runPost(env: Env): Promise<RunResult> {
+export async function runPost(env: Env, account: Account): Promise<RunResult> {
 	console.log("=== PINTEREST POST ===");
-	const notion = new NotionClient(env.NOTION_ACCESS_TOKEN);
-	const pinterest = await PinterestClient.create(env);
+	const notion = new NotionClient(account.notionToken(env));
+	const pinterest = await PinterestClient.create(env, account.tokenState);
 
 	const pins = await notion.getScheduledPins();
 	console.log(`  ${pins.length} pin(s) scheduled to post`);
 
 	const result: RunResult = { processed: 0, ok: 0, failed: 0, skipped: 0 };
 	for (const pin of pins) {
-		const success = await postSinglePin(env, notion, pinterest, pin);
+		const success = await postSinglePin(env, account, notion, pinterest, pin);
 		result.processed++;
 		if (success) result.ok++;
 		else result.failed++;
@@ -41,13 +41,14 @@ export async function runPost(env: Env): Promise<RunResult> {
 
 async function postSinglePin(
 	env: Env,
+	account: Account,
 	notion: NotionClient,
 	pinterest: PinterestClient,
 	pin: ScheduledPin,
 ): Promise<boolean> {
 	console.log(`  Posting: ${pin.title.slice(0, 50)}...`);
 
-	const boardId = await resolveBoardId(env, pinterest, pin.boardName, pin.newBoard);
+	const boardId = await resolveBoardId(env, account, pinterest, pin.boardName, pin.newBoard);
 	if (!boardId) {
 		console.log(`  No board ID for '${pin.boardName}'`);
 		await applyRetry(notion, pin.notionPageId, pin.retryCount);
@@ -80,12 +81,13 @@ async function postSinglePin(
 // Pinterest by name and cache it. Key shape matches the Apify pinterest-boards store.
 async function resolveBoardId(
 	env: Env,
+	account: Account,
 	pinterest: PinterestClient,
 	boardName: string,
 	newBoard: string | null,
 ): Promise<string | null> {
 	if (!boardName) return null;
-	const key = boardKvKey(boardName);
+	const key = boardKvKey(account.boardTenant, boardName);
 
 	const cached = await env.PINTEREST_BOARDS.get(key);
 	if (cached) return cached;
@@ -128,9 +130,9 @@ async function applyRetry(notion: NotionClient, pageId: string, retryCount: numb
 
 // Apify KV keys allowed a-zA-Z0-9!-_.'() and used "." as the tenant separator; keep the
 // exact same sanitization so existing/registered keys line up.
-function boardKvKey(boardName: string): string {
+function boardKvKey(tenant: string, boardName: string): string {
 	const safe = boardName.replace(/[^a-zA-Z0-9!_.'()-]/g, "_");
-	return `${TENANT}.${safe}`;
+	return `${tenant}.${safe}`;
 }
 
 function sleep(ms: number): Promise<void> {

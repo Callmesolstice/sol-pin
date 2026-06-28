@@ -19,14 +19,18 @@
 		// "sol:pinterest_tokens" -> { access_token, refresh_token, expires_in, stored_at }.
 		{
 			"binding": "OAUTH_TOKENS",
-			"id": "3cc8911e6d68407cbc7f0eafeb978bc0"
+			"id": "3cc8911e6d68407cbc7f0eafeb978bc0",
+			// preview_id points at the same real namespace so `wrangler dev --remote`
+			// reads the live tokens the pinterest-oauth-worker wrote.
+			"preview_id": "3cc8911e6d68407cbc7f0eafeb978bc0"
 		},
 		// New namespace, same shape as the Apify "pinterest-boards" KV store.
 		// Key "sol.<sanitized_board_name>" -> board id string.
 		// Replace the placeholder id after `wrangler kv namespace create PINTEREST_BOARDS`.
 		{
 			"binding": "PINTEREST_BOARDS",
-			"id": "REPLACE_WITH_PINTEREST_BOARDS_KV_ID"
+			"id": "d975a76e0dc1454b9adab3bd2ead8475",
+			"preview_id": "d975a76e0dc1454b9adab3bd2ead8475"
 		}
 	],
 

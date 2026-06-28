@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { SOL, type Account } from "./account";
 import { NotionClient } from "./notion";
 import { runPost, type RunResult } from "./post";
 import { runSnapshot } from "./snapshot";
@@ -25,7 +26,7 @@ export default {
 			return;
 		}
 		// waitUntil so the run-log write isn't cut off when scheduled() returns.
-		ctx.waitUntil(runMode(env, mode, "Schedule"));
+		ctx.waitUntil(runMode(env, mode, "Schedule", SOL));
 	},
 
 	async fetch(req: Request, env: Env): Promise<Response> {
@@ -33,25 +34,26 @@ export default {
 		if (mode !== "post" && mode !== "snapshot") {
 			return new Response("Pass ?mode=post or ?mode=snapshot", { status: 400 });
 		}
-		const result = await runMode(env, mode, "Manual");
+		const result = await runMode(env, mode, "Manual", SOL);
 		return Response.json({ mode, ...result });
 	},
 } satisfies ExportedHandler<Env>;
 
-// Run one mode, then always write the run log (mirrors the Python actor's try/finally).
-async function runMode(env: Env, mode: Mode, trigger: "Schedule" | "Manual"): Promise<RunResult> {
+// Run one mode for one account, then always write the run log (mirrors the Python
+// actor's try/finally).
+async function runMode(env: Env, mode: Mode, trigger: "Schedule" | "Manual", account: Account): Promise<RunResult> {
 	const started = Date.now();
 	let result: RunResult = { processed: 0, ok: 0, failed: 0, skipped: 0 };
 	let error: string | null = null;
 	try {
-		result = mode === "post" ? await runPost(env) : await runSnapshot(env);
+		result = mode === "post" ? await runPost(env, account) : await runSnapshot(env, account);
 	} catch (exc) {
 		error = exc instanceof Error ? exc.message : String(exc);
 		console.error(`Run failed: ${error}`);
 	} finally {
 		const metrics = JSON.stringify({ duration_ms: Date.now() - started, ...result });
 		try {
-			await new NotionClient(env.NOTION_ACCESS_TOKEN).writeRunLog({
+			await new NotionClient(account.notionToken(env)).writeRunLog({
 				status: error ? "Failed" : "Success",
 				digest: `mode=${mode}`,
 				pagesTouched: result.processed,
