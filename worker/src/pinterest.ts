@@ -186,6 +186,7 @@ export class PinterestClient {
 		description: string,
 		mediaUrl: string,
 		destLink: string | null,
+		altText: string | null,
 	): Promise<string | null> {
 		const img = await fetch(mediaUrl);
 		if (!img.ok) {
@@ -195,13 +196,16 @@ export class PinterestClient {
 		const contentType = (img.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
 		const data = bytesToBase64(new Uint8Array(await img.arrayBuffer()));
 
-		const payload = {
+		const payload: Record<string, unknown> = {
 			board_id: boardId,
 			title: title.slice(0, 100),
 			description: description.slice(0, 800),
 			link: destLink ?? "",
 			media_source: { source_type: "image_base64", content_type: contentType, data },
 		};
+		// Pinterest alt_text caps at 500 chars; omit when empty.
+		if (altText) payload.alt_text = altText.slice(0, 500);
+
 		const result = (await this.post("pins", payload)) as CreatePinResponse | null;
 		return result?.id ?? null;
 	}

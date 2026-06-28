@@ -42,6 +42,7 @@ export interface ScheduledPin {
 	notionPageId: string;
 	title: string;
 	caption: string;
+	altText: string | null;
 	mediaUrl: string;
 	destLink: string | null;
 	boardName: string;
@@ -145,6 +146,7 @@ export class NotionClient {
 				notionPageId: page.id,
 				title,
 				caption: plainText(p.Caption?.rich_text),
+				altText: plainText(p["Alt text"]?.rich_text) || null,
 				mediaUrl,
 				destLink: p["Dest. link"]?.url ?? null,
 				boardName,

@@ -55,7 +55,7 @@ async function postSinglePin(
 		return false;
 	}
 
-	const pinId = await pinterest.publishPin(boardId, pin.title, pin.caption, pin.mediaUrl, pin.destLink);
+	const pinId = await pinterest.publishPin(boardId, pin.title, pin.caption, pin.mediaUrl, pin.destLink, pin.altText);
 	if (!pinId) {
 		console.log(`  Pinterest returned no pin ID for '${pin.title}'`);
 		await applyRetry(notion, pin.notionPageId, pin.retryCount);
